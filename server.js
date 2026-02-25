@@ -1,25 +1,29 @@
 /**
- * WhatsApp Bridge Server — Saddara Platform
- * 
+ * WhatsApp Bridge Server — Baileys (No Puppeteer/Chrome needed)
+ * Works on any Node.js hosting including Hostinger
+ *
  * Endpoints:
- *   POST /session/start   { merchantId }  → start session + return QR
- *   GET  /session/qr      ?merchantId=X   → get latest QR (base64 img src)
+ *   POST /session/start   { merchantId }  → start session
+ *   GET  /session/qr      ?merchantId=X   → get QR as base64 image
  *   GET  /session/status  ?merchantId=X   → get status
  *   POST /send            { merchantId, phone, message }
  *   POST /session/logout  { merchantId }
+ *   GET  /health
  */
 
-const { Client, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
-const qrcode = require('qrcode');
-const app = express();
+const QRCode = require('qrcode');
+const pino = require('pino');
+const path = require('path');
+const fs = require('fs');
 
+const app = express();
 app.use(express.json());
 
-// In-memory sessions map: merchantId → { client, status, qrDataUrl }
-const sessions = {};
+// Silent logger (no noise in logs)
+const logger = pino({ level: 'silent' });
 
-// ─── Middleware: simple secret key check ────────────────────────────────────
+// Secret key middleware
 const SECRET = process.env.BRIDGE_SECRET || 'saddara_wa_bridge_2025';
 app.use((req, res, next) => {
     const key = req.headers['x-bridge-key'] || req.query.key;
@@ -27,86 +31,103 @@ app.use((req, res, next) => {
     next();
 });
 
-// ─── Start or restart a session ─────────────────────────────────────────────
+// In-memory sessions: merchantId → { sock, status, qr }
+const sessions = {};
+
+// ─── Start or restart a session ──────────────────────────────────────────────
 app.post('/session/start', async (req, res) => {
     const { merchantId } = req.body;
     if (!merchantId) return res.status(400).json({ error: 'merchantId required' });
 
     const mid = String(merchantId);
 
-    // If already connected, return status
+    // Already connected
     if (sessions[mid] && sessions[mid].status === 'WORKING') {
-        return res.json({ success: true, status: 'WORKING', qr: null });
+        return res.json({ success: true, status: 'WORKING' });
     }
 
-    // Destroy old session if exists
-    if (sessions[mid] && sessions[mid].client) {
-        try { await sessions[mid].client.destroy(); } catch (e) { }
+    // Clean up old session
+    if (sessions[mid] && sessions[mid].sock) {
+        try { sessions[mid].sock.end(); } catch (e) { }
         delete sessions[mid];
     }
 
-    sessions[mid] = { client: null, status: 'STARTING', qr: null };
+    sessions[mid] = { sock: null, status: 'STARTING', qr: null };
 
-    const client = new Client({
-        authStrategy: new LocalAuth({ clientId: 'merchant_' + mid, dataPath: './sessions' }),
-        puppeteer: {
-            headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process',
-                '--disable-gpu'
-            ]
-        }
-    });
-
-    sessions[mid].client = client;
-
-    client.on('qr', async (qr) => {
-        try {
-            sessions[mid].qr = await qrcode.toDataURL(qr);
-            sessions[mid].status = 'SCAN_QR_CODE';
-            console.log(`[Merchant ${mid}] QR generated`);
-        } catch (e) { console.error(e); }
-    });
-
-    client.on('authenticated', () => {
-        sessions[mid].status = 'AUTHENTICATED';
-        sessions[mid].qr = null;
-        console.log(`[Merchant ${mid}] Authenticated`);
-    });
-
-    client.on('ready', () => {
-        sessions[mid].status = 'WORKING';
-        sessions[mid].qr = null;
-        console.log(`[Merchant ${mid}] Ready`);
-    });
-
-    client.on('disconnected', (reason) => {
-        sessions[mid].status = 'STOPPED';
-        sessions[mid].qr = null;
-        console.log(`[Merchant ${mid}] Disconnected: ${reason}`);
-    });
-
-    client.on('auth_failure', () => {
-        sessions[mid].status = 'AUTH_FAILURE';
-        console.log(`[Merchant ${mid}] Auth failure`);
-    });
-
-    // Initialize async (don't await — return immediately)
-    client.initialize().catch(e => {
-        console.error(`[Merchant ${mid}] Init error:`, e.message);
-        sessions[mid].status = 'ERROR';
-    });
-
+    // Respond immediately — session starts async
     res.json({ success: true, status: 'STARTING' });
+
+    // Init async
+    initSession(mid);
 });
 
-// ─── Get QR code ─────────────────────────────────────────────────────────────
+async function initSession(mid) {
+    try {
+        // Dynamic import (Baileys is ESM)
+        const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = await import('@whiskeysockets/baileys');
+        const { Boom } = await import('@hapi/boom');
+
+        const authDir = path.join(__dirname, 'sessions', 'merchant_' + mid);
+        fs.mkdirSync(authDir, { recursive: true });
+
+        const { state, saveCreds } = await useMultiFileAuthState(authDir);
+
+        const sock = makeWASocket({
+            auth: state,
+            logger: logger,
+            browser: Browsers.ubuntu('Chrome'),
+            printQRInTerminal: false,
+        });
+
+        sessions[mid].sock = sock;
+
+        // QR event
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr) {
+                try {
+                    sessions[mid].qr = await QRCode.toDataURL(qr);
+                    sessions[mid].status = 'SCAN_QR_CODE';
+                    console.log(`[Merchant ${mid}] QR ready`);
+                } catch (e) { console.error(e); }
+            }
+
+            if (connection === 'close') {
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+                console.log(`[Merchant ${mid}] Disconnected, code: ${statusCode}, reconnect: ${shouldReconnect}`);
+
+                if (shouldReconnect) {
+                    sessions[mid].status = 'RECONNECTING';
+                    sessions[mid].qr = null;
+                    setTimeout(() => initSession(mid), 3000);
+                } else {
+                    // Logged out — clear auth
+                    sessions[mid].status = 'STOPPED';
+                    sessions[mid].qr = null;
+                    try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) { }
+                }
+            }
+
+            if (connection === 'open') {
+                sessions[mid].status = 'WORKING';
+                sessions[mid].qr = null;
+                console.log(`[Merchant ${mid}] Connected!`);
+            }
+        });
+
+        // Save credentials on update
+        sock.ev.on('creds.update', saveCreds);
+
+    } catch (err) {
+        console.error(`[Merchant ${mid}] Init error:`, err.message);
+        if (sessions[mid]) sessions[mid].status = 'ERROR';
+    }
+}
+
+// ─── Get QR ──────────────────────────────────────────────────────────────────
 app.get('/session/qr', (req, res) => {
     const mid = String(req.query.merchantId || '');
     if (!sessions[mid]) return res.json({ success: false, status: 'NOT_STARTED', qr: null });
@@ -118,28 +139,27 @@ app.get('/session/qr', (req, res) => {
     });
 });
 
-// ─── Get session status ───────────────────────────────────────────────────────
+// ─── Get Status ───────────────────────────────────────────────────────────────
 app.get('/session/status', (req, res) => {
     const mid = String(req.query.merchantId || '');
     if (!sessions[mid]) return res.json({ status: 'NOT_STARTED' });
     res.json({ status: sessions[mid].status });
 });
 
-// ─── Send message ─────────────────────────────────────────────────────────────
+// ─── Send Message ─────────────────────────────────────────────────────────────
 app.post('/send', async (req, res) => {
     const { merchantId, phone, message } = req.body;
     const mid = String(merchantId || '');
 
     if (!sessions[mid] || sessions[mid].status !== 'WORKING') {
-        return res.status(400).json({ success: false, error: 'Session not ready' });
+        return res.status(400).json({ success: false, error: 'Session not ready: ' + (sessions[mid]?.status || 'NOT_STARTED') });
     }
 
     try {
-        // Normalize phone: strip non-digits, ensure no leading +
         const normalized = String(phone).replace(/[^0-9]/g, '');
-        const chatId = normalized + '@c.us';
+        const jid = normalized + '@s.whatsapp.net';
 
-        await sessions[mid].client.sendMessage(chatId, message);
+        await sessions[mid].sock.sendMessage(jid, { text: message });
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ success: false, error: e.message });
@@ -149,22 +169,28 @@ app.post('/send', async (req, res) => {
 // ─── Logout ───────────────────────────────────────────────────────────────────
 app.post('/session/logout', async (req, res) => {
     const mid = String(req.body.merchantId || '');
-    if (!sessions[mid]) return res.json({ success: true, message: 'No session found' });
+    if (!sessions[mid]) return res.json({ success: true });
 
     try {
-        await sessions[mid].client.logout();
-        await sessions[mid].client.destroy();
-    } catch (e) { /* ignore */ }
+        if (sessions[mid].sock) await sessions[mid].sock.logout();
+    } catch (e) { }
+
+    const authDir = path.join(__dirname, 'sessions', 'merchant_' + mid);
+    try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) { }
 
     delete sessions[mid];
     res.json({ success: true });
 });
 
-// ─── Health check ─────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ ok: true, sessions: Object.keys(sessions).length }));
+// ─── Health ───────────────────────────────────────────────────────────────────
+app.get('/health', (req, res) => {
+    const info = {};
+    for (const mid in sessions) info[mid] = sessions[mid].status;
+    res.json({ ok: true, sessions: info });
+});
 
-// ─── Start ───────────────────────────────────────────────────────────────────
+// ─── Start Server ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`WA Bridge running on port ${PORT}`);
+    console.log(`WA Bridge (Baileys) running on port ${PORT}`);
 });

@@ -1,14 +1,15 @@
 {
   "name": "wa-bridge",
   "version": "1.0.0",
-  "description": "WhatsApp Bridge for Saddara Platform",
+  "description": "WhatsApp Bridge for Saddara Platform - Baileys",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "whatsapp-web.js": "^1.23.0",
-    "qrcode": "^1.5.3"
+    "@whiskeysockets/baileys": "^6.7.9",
+    "qrcode": "^1.5.3",
+    "pino": "^8.19.0"
   }
 }
