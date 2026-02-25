@@ -100,11 +100,11 @@ async function initSession(mid) {
                 console.log(`[Merchant ${mid}] Disconnected, code: ${statusCode}, reconnect: ${shouldReconnect}`);
 
                 if (shouldReconnect) {
-                    sessions[mid].status = 'RECONNECTING';
-                    sessions[mid].qr = null;
-                    setTimeout(() => initSession(mid), 3000);
+                    // Keep existing QR — don't clear it, new QR will overwrite on next attempt
+                    sessions[mid].status = sessions[mid].qr ? 'SCAN_QR_CODE' : 'RECONNECTING';
+                    setTimeout(() => initSession(mid), 2000);
                 } else {
-                    // Logged out — clear auth
+                    // Logged out — clear everything
                     sessions[mid].status = 'STOPPED';
                     sessions[mid].qr = null;
                     try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) { }
