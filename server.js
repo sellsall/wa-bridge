@@ -46,13 +46,18 @@ app.post('/session/start', async (req, res) => {
         return res.json({ success: true, status: 'WORKING' });
     }
 
-    // Clean up old session
-    if (sessions[mid] && sessions[mid].sock) {
-        try { sessions[mid].sock.end(); } catch (e) { }
+    // Clean up old or stuck session (including RECONNECTING)
+    if (sessions[mid]) {
+        if (sessions[mid].sock) {
+            try { sessions[mid].sock.end(); } catch (e) { }
+        }
+        // Clear auth dir to force fresh QR on stuck sessions
+        const authDir = path.join(__dirname, 'sessions', 'merchant_' + mid);
+        try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) { }
         delete sessions[mid];
     }
 
-    sessions[mid] = { sock: null, status: 'STARTING', qr: null };
+    sessions[mid] = { sock: null, status: 'STARTING', qr: null, reconnectAttempts: 0 };
 
     // Respond immediately — session starts async
     res.json({ success: true, status: 'STARTING' });
@@ -100,9 +105,19 @@ async function initSession(mid) {
                 console.log(`[Merchant ${mid}] Disconnected, code: ${statusCode}, reconnect: ${shouldReconnect}`);
 
                 if (shouldReconnect) {
-                    // Keep existing QR — don't clear it, new QR will overwrite on next attempt
-                    sessions[mid].status = sessions[mid].qr ? 'SCAN_QR_CODE' : 'RECONNECTING';
-                    setTimeout(() => initSession(mid), 2000);
+                    sessions[mid].reconnectAttempts = (sessions[mid].reconnectAttempts || 0) + 1;
+
+                    if (sessions[mid].reconnectAttempts >= 5) {
+                        // Too many retries — stop and wait for manual restart via /session/start
+                        console.log(`[Merchant ${mid}] Max reconnect attempts reached. Stopping.`);
+                        sessions[mid].status = 'STOPPED';
+                        sessions[mid].qr = null;
+                        try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) { }
+                    } else {
+                        // Keep existing QR — don't clear it, new QR will overwrite on next attempt
+                        sessions[mid].status = sessions[mid].qr ? 'SCAN_QR_CODE' : 'RECONNECTING';
+                        setTimeout(() => initSession(mid), 3000);
+                    }
                 } else {
                     // Logged out — clear everything
                     sessions[mid].status = 'STOPPED';
