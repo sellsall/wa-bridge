@@ -57,7 +57,7 @@ app.post('/session/start', async (req, res) => {
         delete sessions[mid];
     }
 
-    sessions[mid] = { sock: null, status: 'STARTING', qr: null, reconnectAttempts: 0 };
+    sessions[mid] = { sock: null, status: 'STARTING', qr: null, reconnectAttempts: 0, lastError: null };
 
     // Respond immediately — session starts async
     res.json({ success: true, status: 'STARTING' });
@@ -68,9 +68,10 @@ app.post('/session/start', async (req, res) => {
 
 async function initSession(mid) {
     try {
-        // Dynamic import (Baileys is ESM)
-        const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = await import('@whiskeysockets/baileys');
-        const { Boom } = await import('@hapi/boom');
+        // Dynamic import (Baileys is ESM — @hapi/boom is bundled inside baileys)
+        const baileysModule = await import('@whiskeysockets/baileys');
+        const makeWASocket = baileysModule.default;
+        const { useMultiFileAuthState, DisconnectReason } = baileysModule;
 
         const authDir = path.join(__dirname, 'sessions', 'merchant_' + mid);
         fs.mkdirSync(authDir, { recursive: true });
@@ -80,13 +81,15 @@ async function initSession(mid) {
         const sock = makeWASocket({
             auth: state,
             logger: logger,
-            browser: Browsers.ubuntu('Chrome'),
+            browser: ['Saddara', 'Chrome', '120.0'],
             printQRInTerminal: false,
+            connectTimeoutMs: 30000,
+            defaultQueryTimeoutMs: 30000,
         });
 
         sessions[mid].sock = sock;
 
-        // QR event
+        // QR & connection events
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
 
@@ -94,12 +97,14 @@ async function initSession(mid) {
                 try {
                     sessions[mid].qr = await QRCode.toDataURL(qr);
                     sessions[mid].status = 'SCAN_QR_CODE';
+                    sessions[mid].reconnectAttempts = 0; // reset on QR
                     console.log(`[Merchant ${mid}] QR ready`);
-                } catch (e) { console.error(e); }
+                } catch (e) { console.error('QR gen error:', e); }
             }
 
             if (connection === 'close') {
-                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const errOutput = lastDisconnect?.error?.output;
+                const statusCode = errOutput?.statusCode;
                 const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
                 console.log(`[Merchant ${mid}] Disconnected, code: ${statusCode}, reconnect: ${shouldReconnect}`);
@@ -108,18 +113,15 @@ async function initSession(mid) {
                     sessions[mid].reconnectAttempts = (sessions[mid].reconnectAttempts || 0) + 1;
 
                     if (sessions[mid].reconnectAttempts >= 5) {
-                        // Too many retries — stop and wait for manual restart via /session/start
                         console.log(`[Merchant ${mid}] Max reconnect attempts reached. Stopping.`);
                         sessions[mid].status = 'STOPPED';
                         sessions[mid].qr = null;
                         try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) { }
                     } else {
-                        // Keep existing QR — don't clear it, new QR will overwrite on next attempt
                         sessions[mid].status = sessions[mid].qr ? 'SCAN_QR_CODE' : 'RECONNECTING';
                         setTimeout(() => initSession(mid), 3000);
                     }
                 } else {
-                    // Logged out — clear everything
                     sessions[mid].status = 'STOPPED';
                     sessions[mid].qr = null;
                     try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) { }
@@ -129,18 +131,29 @@ async function initSession(mid) {
             if (connection === 'open') {
                 sessions[mid].status = 'WORKING';
                 sessions[mid].qr = null;
+                sessions[mid].reconnectAttempts = 0;
                 console.log(`[Merchant ${mid}] Connected!`);
             }
         });
 
-        // Save credentials on update
         sock.ev.on('creds.update', saveCreds);
 
     } catch (err) {
-        console.error(`[Merchant ${mid}] Init error:`, err.message);
-        if (sessions[mid]) sessions[mid].status = 'ERROR';
+        console.error(`[Merchant ${mid}] Init error:`, err.stack || err.message);
+        if (sessions[mid]) {
+            sessions[mid].status = 'ERROR';
+            sessions[mid].qr = null;
+            sessions[mid].lastError = err.message;
+        }
     }
 }
+
+// ─── Debug: last error ───────────────────────────────────────────────────────
+app.get('/session/error', (req, res) => {
+    const mid = String(req.query.merchantId || '');
+    if (!sessions[mid]) return res.json({ error: 'no session' });
+    res.json({ status: sessions[mid].status, lastError: sessions[mid].lastError || null });
+});
 
 // ─── Get QR ──────────────────────────────────────────────────────────────────
 app.get('/session/qr', (req, res) => {
@@ -206,6 +219,13 @@ app.get('/health', (req, res) => {
 
 // ─── Start Server ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     console.log(`WA Bridge (Baileys) running on port ${PORT}`);
 });
+
+// ─── Keep-Alive (prevents Render free plan from sleeping) ────────────────────
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+setInterval(() => {
+    const http = SELF_URL.startsWith('https') ? require('https') : require('http');
+    http.get(`${SELF_URL}/health?key=${SECRET}`, () => { }).on('error', () => { });
+}, 14 * 60 * 1000); // every 14 minutes
