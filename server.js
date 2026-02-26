@@ -199,6 +199,19 @@ app.post('/send', async (req, res) => {
     }
 });
 
+// ─── Session Me (connected phone) ────────────────────────────────────────────
+app.get('/session/me', (req, res) => {
+    const mid = String(req.query.merchantId || '');
+    if (!sessions[mid]) return res.json({ success: false, error: 'no session' });
+
+    const user = sessions[mid].sock?.user;
+    if (!user) return res.json({ success: false, error: 'not connected' });
+
+    // user.id = "201153220643:XX@s.whatsapp.net" → extract phone
+    const phone = (user.id || '').split(':')[0].split('@')[0];
+    res.json({ success: true, phone });
+});
+
 // ─── QR ──────────────────────────────────────────────────────────────────────
 app.get('/session/qr', (req, res) => {
     const mid = String(req.query.merchantId || '');
