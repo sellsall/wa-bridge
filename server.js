@@ -71,7 +71,11 @@ async function initSession(mid) {
         // Dynamic import (Baileys is ESM — @hapi/boom is bundled inside baileys)
         const baileysModule = await import('@whiskeysockets/baileys');
         const makeWASocket = baileysModule.default;
-        const { useMultiFileAuthState, DisconnectReason } = baileysModule;
+        const { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = baileysModule;
+
+        // Fetch latest WA version to avoid code:405 rejection
+        const { version } = await fetchLatestBaileysVersion();
+        console.log(`[Merchant ${mid}] WA version: ${version}`);
 
         const authDir = path.join(__dirname, 'sessions', 'merchant_' + mid);
         fs.mkdirSync(authDir, { recursive: true });
@@ -79,12 +83,15 @@ async function initSession(mid) {
         const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
         const sock = makeWASocket({
+            version,
             auth: state,
             logger: logger,
-            browser: ['Saddara', 'Chrome', '120.0'],
+            browser: ['WhatsApp Web', 'Chrome', '120.0.6099.109'],
             printQRInTerminal: false,
-            connectTimeoutMs: 30000,
-            defaultQueryTimeoutMs: 30000,
+            connectTimeoutMs: 60000,
+            defaultQueryTimeoutMs: 60000,
+            keepAliveIntervalMs: 10000,
+            markOnlineOnConnect: false,
         });
 
         sessions[mid].sock = sock;
