@@ -1,6 +1,5 @@
 /**
  * WhatsApp Bridge Server — Baileys
- * Fixed: send retry, connection validation, health ping
  */
 
 const express = require('express');
@@ -15,14 +14,12 @@ app.use(express.json());
 const logger = pino({ level: 'silent' });
 const SECRET = process.env.BRIDGE_SECRET || 'saddara_wa_bridge_2025';
 
-// Auth middleware
 app.use((req, res, next) => {
     const key = req.headers['x-bridge-key'] || req.query.key;
     if (key !== SECRET) return res.status(401).json({ error: 'Unauthorized' });
     next();
 });
 
-// sessions: merchantId → { sock, status, qr, reconnectAttempts, lastError }
 const sessions = {};
 
 // ─── Start Session ────────────────────────────────────────────────────────────
@@ -36,7 +33,6 @@ app.post('/session/start', async (req, res) => {
         return res.json({ success: true, status: 'WORKING' });
     }
 
-    // Clean old/stuck session
     if (sessions[mid]) {
         try { sessions[mid].sock?.ev?.removeAllListeners(); } catch (e) { }
         try { sessions[mid].sock?.end(); } catch (e) { }
@@ -76,7 +72,6 @@ async function initSession(mid) {
             keepAliveIntervalMs: 15000,
             retryRequestDelayMs: 2000,
             markOnlineOnConnect: false,
-            generateHighQualityLinkPreview: false,
         });
 
         sessions[mid].sock = sock;
@@ -90,7 +85,7 @@ async function initSession(mid) {
                     sessions[mid].status = 'SCAN_QR_CODE';
                     sessions[mid].reconnectAttempts = 0;
                     console.log(`[${mid}] QR ready`);
-                } catch (e) { console.error('QR error:', e); }
+                } catch (e) { }
             }
 
             if (connection === 'open') {
@@ -145,7 +140,7 @@ async function initSession(mid) {
     }
 }
 
-// ─── Send Message (with retry) ────────────────────────────────────────────────
+// ─── Send Message ─────────────────────────────────────────────────────────────
 app.post('/send', async (req, res) => {
     const { merchantId, phone, message } = req.body;
     const mid = String(merchantId || '');
@@ -156,7 +151,6 @@ app.post('/send', async (req, res) => {
 
     const session = sessions[mid];
 
-    // Session not ready
     if (!session) {
         return res.status(400).json({ success: false, error: 'Session not started' });
     }
@@ -165,7 +159,6 @@ app.post('/send', async (req, res) => {
         return res.status(400).json({ success: false, error: 'Session not ready: ' + session.status });
     }
 
-    // Validate socket is still alive
     if (!session.sock || !session.sock.user) {
         session.status = 'RECONNECTING';
         initSession(mid);
@@ -173,17 +166,23 @@ app.post('/send', async (req, res) => {
     }
 
     try {
-        const normalized = String(phone).replace(/[^0-9]/g, '');
-        const fullNumber = normalized.startsWith('966') || normalized.length > 10
+        // حذف + أو 00 من بداية الرقم — WhatsApp لا يقبل + أو 00
+        const normalized = String(phone)
+            .replace(/\s+/g, '')   // احذف المسافات
+            .replace(/^\+/, '')    // احذف + من البداية
+            .replace(/^00+/, '')   // احذف 00 أو 000 من البداية
+            .replace(/[^0-9]/g, ''); // احذف أي رمز غير رقمي
+
+        const fullNumber = normalized.length >= 10
             ? normalized
             : '966' + normalized.replace(/^0+/, '');
 
         const jid = fullNumber + '@s.whatsapp.net';
         console.log(`[${mid}] Sending to ${jid}`);
 
-        // Timeout wrapper — prevents hanging if WA socket is silent
+        // منع التعلق — timeout 20 ثانية
         const sendTimeout = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('sendMessage timeout after 15s')), 15000)
+            setTimeout(() => reject(new Error('sendMessage timeout after 20s')), 20000)
         );
 
         await Promise.race([
@@ -212,7 +211,6 @@ app.get('/session/status', (req, res) => {
     const mid = String(req.query.merchantId || '');
     if (!sessions[mid]) return res.json({ status: 'NOT_STARTED' });
 
-    // Auto-detect dead socket
     const session = sessions[mid];
     if (session.status === 'WORKING' && (!session.sock || !session.sock.user)) {
         session.status = 'RECONNECTING';
