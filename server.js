@@ -4,10 +4,10 @@
  */
 
 const express = require('express');
-const QRCode  = require('qrcode');
-const pino    = require('pino');
-const path    = require('path');
-const fs      = require('fs');
+const QRCode = require('qrcode');
+const pino = require('pino');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 app.use(express.json());
@@ -38,10 +38,10 @@ app.post('/session/start', async (req, res) => {
 
     // Clean old/stuck session
     if (sessions[mid]) {
-        try { sessions[mid].sock?.ev?.removeAllListeners(); } catch (e) {}
-        try { sessions[mid].sock?.end(); } catch (e) {}
+        try { sessions[mid].sock?.ev?.removeAllListeners(); } catch (e) { }
+        try { sessions[mid].sock?.end(); } catch (e) { }
         const authDir = path.join(__dirname, 'sessions', 'merchant_' + mid);
-        try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) {}
+        try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) { }
         delete sessions[mid];
     }
 
@@ -86,7 +86,7 @@ async function initSession(mid) {
 
             if (qr) {
                 try {
-                    sessions[mid].qr     = await QRCode.toDataURL(qr);
+                    sessions[mid].qr = await QRCode.toDataURL(qr);
                     sessions[mid].status = 'SCAN_QR_CODE';
                     sessions[mid].reconnectAttempts = 0;
                     console.log(`[${mid}] QR ready`);
@@ -95,24 +95,24 @@ async function initSession(mid) {
 
             if (connection === 'open') {
                 sessions[mid].status = 'WORKING';
-                sessions[mid].qr     = null;
+                sessions[mid].qr = null;
                 sessions[mid].reconnectAttempts = 0;
                 console.log(`[${mid}] Connected ✓`);
             }
 
             if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
-                const errMsg     = lastDisconnect?.error?.message || String(lastDisconnect?.error || 'unknown');
-                const loggedOut  = statusCode === DisconnectReason.loggedOut;
+                const errMsg = lastDisconnect?.error?.message || String(lastDisconnect?.error || 'unknown');
+                const loggedOut = statusCode === DisconnectReason.loggedOut;
 
                 console.log(`[${mid}] Disconnected code:${statusCode} msg:${errMsg}`);
                 if (sessions[mid]) sessions[mid].lastError = `code:${statusCode} - ${errMsg}`;
 
                 if (loggedOut) {
                     sessions[mid].status = 'STOPPED';
-                    sessions[mid].qr     = null;
+                    sessions[mid].qr = null;
                     const authDir = path.join(__dirname, 'sessions', 'merchant_' + mid);
-                    try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) {}
+                    try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) { }
                     return;
                 }
 
@@ -121,9 +121,9 @@ async function initSession(mid) {
                 if (sessions[mid].reconnectAttempts >= 5) {
                     console.log(`[${mid}] Max reconnects — STOPPED`);
                     sessions[mid].status = 'STOPPED';
-                    sessions[mid].qr     = null;
+                    sessions[mid].qr = null;
                     const authDir = path.join(__dirname, 'sessions', 'merchant_' + mid);
-                    try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) {}
+                    try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) { }
                 } else {
                     sessions[mid].status = 'RECONNECTING';
                     const delay = Math.min(3000 * sessions[mid].reconnectAttempts, 15000);
@@ -138,8 +138,8 @@ async function initSession(mid) {
     } catch (err) {
         console.error(`[${mid}] Init error:`, err.stack || err.message);
         if (sessions[mid]) {
-            sessions[mid].status    = 'ERROR';
-            sessions[mid].qr        = null;
+            sessions[mid].status = 'ERROR';
+            sessions[mid].qr = null;
             sessions[mid].lastError = err.message;
         }
     }
@@ -174,15 +174,23 @@ app.post('/send', async (req, res) => {
 
     try {
         const normalized = String(phone).replace(/[^0-9]/g, '');
-        // Add country code if missing (default Saudi Arabia 966)
-        const fullNumber = normalized.startsWith('966') || normalized.startsWith('1') || normalized.length > 10
+        const fullNumber = normalized.startsWith('966') || normalized.length > 10
             ? normalized
             : '966' + normalized.replace(/^0+/, '');
 
         const jid = fullNumber + '@s.whatsapp.net';
         console.log(`[${mid}] Sending to ${jid}`);
 
-        await session.sock.sendMessage(jid, { text: message });
+        // Timeout wrapper — prevents hanging if WA socket is silent
+        const sendTimeout = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('sendMessage timeout after 15s')), 15000)
+        );
+
+        await Promise.race([
+            session.sock.sendMessage(jid, { text: message }),
+            sendTimeout
+        ]);
+
         console.log(`[${mid}] Message sent ✓`);
         res.json({ success: true });
 
@@ -226,11 +234,11 @@ app.post('/session/logout', async (req, res) => {
     const mid = String(req.body.merchantId || '');
     if (!sessions[mid]) return res.json({ success: true });
 
-    try { sessions[mid].sock?.ev?.removeAllListeners(); } catch (e) {}
-    try { await sessions[mid].sock?.logout(); } catch (e) {}
+    try { sessions[mid].sock?.ev?.removeAllListeners(); } catch (e) { }
+    try { await sessions[mid].sock?.logout(); } catch (e) { }
 
     const authDir = path.join(__dirname, 'sessions', 'merchant_' + mid);
-    try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) {}
+    try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) { }
 
     delete sessions[mid];
     res.json({ success: true });
@@ -257,5 +265,5 @@ app.listen(PORT, () => console.log(`WA Bridge running on port ${PORT}`));
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 setInterval(() => {
     const http = SELF_URL.startsWith('https') ? require('https') : require('http');
-    http.get(`${SELF_URL}/health?key=${SECRET}`, () => {}).on('error', () => {});
+    http.get(`${SELF_URL}/health?key=${SECRET}`, () => { }).on('error', () => { });
 }, 14 * 60 * 1000);
