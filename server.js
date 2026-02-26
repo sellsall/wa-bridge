@@ -106,8 +106,10 @@ async function initSession(mid) {
                 const errOutput = lastDisconnect?.error?.output;
                 const statusCode = errOutput?.statusCode;
                 const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                const errMsg = lastDisconnect?.error?.message || String(lastDisconnect?.error || 'unknown');
 
-                console.log(`[Merchant ${mid}] Disconnected, code: ${statusCode}, reconnect: ${shouldReconnect}`);
+                console.log(`[Merchant ${mid}] Disconnected code:${statusCode} msg:${errMsg} reconnect:${shouldReconnect}`);
+                if (sessions[mid]) sessions[mid].lastError = `code:${statusCode} - ${errMsg}`;
 
                 if (shouldReconnect) {
                     sessions[mid].reconnectAttempts = (sessions[mid].reconnectAttempts || 0) + 1;
