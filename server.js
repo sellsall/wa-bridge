@@ -72,6 +72,7 @@ async function initSession(mid) {
             keepAliveIntervalMs: 15000,
             retryRequestDelayMs: 2000,
             markOnlineOnConnect: false,
+            syncFullHistory: false,
         });
 
         sessions[mid].sock = sock;
@@ -95,7 +96,7 @@ async function initSession(mid) {
                 console.log(`[${mid}] Connected ✓`);
                 try {
                     await sock.sendPresenceUpdate('unavailable');
-                } catch(e) {}
+                } catch (e) { }
             }
 
             if (connection === 'close') {
@@ -204,13 +205,30 @@ app.post('/send', async (req, res) => {
         } finally {
             try {
                 await session.sock.sendPresenceUpdate('unavailable');
-            } catch (e) {}
+            } catch (e) { }
         }
         res.json({ success: true });
 
     } catch (e) {
         console.error(`[${mid}] Send error:`, e.message);
         res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+// ─── Control Presence ───────────────────────────────────────────────────────────
+app.post('/session/presence', async (req, res) => {
+    const { merchantId, presence } = req.body;
+    const mid = String(merchantId || '');
+    const sess = sessions[mid];
+
+    if (!sess) return res.json({ success: false, error: 'no session' });
+    if (!sess.sock) return res.json({ success: false, error: 'not connected' });
+
+    try {
+        await sess.sock.sendPresenceUpdate(presence || 'unavailable');
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false, error: e.message });
     }
 });
 
