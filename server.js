@@ -93,6 +93,9 @@ async function initSession(mid) {
                 sessions[mid].qr = null;
                 sessions[mid].reconnectAttempts = 0;
                 console.log(`[${mid}] Connected ✓`);
+                try {
+                    await sock.sendPresenceUpdate('unavailable');
+                } catch(e) {}
             }
 
             if (connection === 'close') {
@@ -185,12 +188,24 @@ app.post('/send', async (req, res) => {
             setTimeout(() => reject(new Error('sendMessage timeout after 20s')), 20000)
         );
 
-        await Promise.race([
-            session.sock.sendMessage(jid, { text: message }),
-            sendTimeout
-        ]);
+        try {
+            await session.sock.sendPresenceUpdate('available');
+            await new Promise(r => setTimeout(r, 1000));
+            // يمكننا إظهار "يكتب..."
+            await session.sock.sendPresenceUpdate('composing', jid);
+            await new Promise(r => setTimeout(r, 1500));
 
-        console.log(`[${mid}] Message sent ✓`);
+            await Promise.race([
+                session.sock.sendMessage(jid, { text: message }),
+                sendTimeout
+            ]);
+
+            console.log(`[${mid}] Message sent ✓`);
+        } finally {
+            try {
+                await session.sock.sendPresenceUpdate('unavailable');
+            } catch (e) {}
+        }
         res.json({ success: true });
 
     } catch (e) {
