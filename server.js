@@ -268,8 +268,10 @@ app.post('/notify/order', async (req, res) => {
 app.post('/send-reminder', async (req, res) => {
     const { merchantId, phone, reminderType, customerName, orderId, total, currency, storeName } = req.body;
     const mid = String(merchantId || '');
+    console.log('[DEBUG /send-reminder] body=', JSON.stringify(req.body));
 
     if (!mid || !phone || !orderId || !reminderType) {
+        console.log('[DEBUG /send-reminder] 400 reason: mid=', mid, 'phone=', phone, 'orderId=', orderId, 'reminderType=', reminderType);
         return res.status(400).json({ success: false, error: 'merchantId, phone, orderId, reminderType required' });
     }
 
