@@ -151,7 +151,12 @@ function normalizePhone(phone) {
         .replace(/^\+/, '')
         .replace(/^00+/, '')
         .replace(/[^0-9]/g, '');
-    return normalized.length >= 10 ? normalized : '966' + normalized.replace(/^0+/, '');
+
+    // Known country code prefixes (GCC + major countries)
+    const knownPrefixes = ['966', '971', '965', '973', '968', '974', '20', '1', '44', '49', '33', '39'];
+    const hasPrefix = knownPrefixes.some(p => normalized.startsWith(p));
+
+    return hasPrefix ? normalized : '966' + normalized.replace(/^0+/, '');
 }
 
 function shouldShowOnline(type) {
