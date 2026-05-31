@@ -144,9 +144,56 @@ async function initSession(mid) {
     }
 }
 
+// ─── Helpers ────────────────────────────────────────────────────────────────
+function normalizePhone(phone) {
+    const normalized = String(phone)
+        .replace(/\s+/g, '')
+        .replace(/^\+/, '')
+        .replace(/^00+/, '')
+        .replace(/[^0-9]/g, '');
+    return normalized.length >= 10 ? normalized : '966' + normalized.replace(/^0+/, '');
+}
+
+function shouldShowOnline(type) {
+    const onlineTypes = ['abandoned_cart', 'alert', 'reminder', 'order_notification', 'order_status'];
+    return onlineTypes.includes(type);
+}
+
+async function sendMessageInternal(session, mid, phone, message, type) {
+    const fullNumber = normalizePhone(phone);
+    const jid = fullNumber + '@s.whatsapp.net';
+    console.log(`[${mid}] Sending to ${jid} (type=${type || 'default'})`);
+
+    const sendTimeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('sendMessage timeout after 20s')), 20000)
+    );
+
+    const showOnline = shouldShowOnline(type);
+
+    try {
+        if (showOnline) {
+            await session.sock.sendPresenceUpdate('available');
+            await new Promise(r => setTimeout(r, 1000));
+            await session.sock.sendPresenceUpdate('composing', jid);
+            await new Promise(r => setTimeout(r, 1500));
+        }
+
+        await Promise.race([
+            session.sock.sendMessage(jid, { text: message }),
+            sendTimeout
+        ]);
+
+        console.log(`[${mid}] Message sent ✓`);
+    } finally {
+        if (showOnline) {
+            try { await session.sock.sendPresenceUpdate('unavailable'); } catch (e) { }
+        }
+    }
+}
+
 // ─── Send Message ─────────────────────────────────────────────────────────────
 app.post('/send', async (req, res) => {
-    const { merchantId, phone, message } = req.body;
+    const { merchantId, phone, message, type } = req.body;
     const mid = String(merchantId || '');
 
     if (!mid || !phone || !message) {
@@ -170,47 +217,84 @@ app.post('/send', async (req, res) => {
     }
 
     try {
-        // حذف + أو 00 من بداية الرقم — WhatsApp لا يقبل + أو 00
-        const normalized = String(phone)
-            .replace(/\s+/g, '')   // احذف المسافات
-            .replace(/^\+/, '')    // احذف + من البداية
-            .replace(/^00+/, '')   // احذف 00 أو 000 من البداية
-            .replace(/[^0-9]/g, ''); // احذف أي رمز غير رقمي
-
-        const fullNumber = normalized.length >= 10
-            ? normalized
-            : '966' + normalized.replace(/^0+/, '');
-
-        const jid = fullNumber + '@s.whatsapp.net';
-        console.log(`[${mid}] Sending to ${jid}`);
-
-        // منع التعلق — timeout 20 ثانية
-        const sendTimeout = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('sendMessage timeout after 20s')), 20000)
-        );
-
-        try {
-            await session.sock.sendPresenceUpdate('available');
-            await new Promise(r => setTimeout(r, 1000));
-            // يمكننا إظهار "يكتب..."
-            await session.sock.sendPresenceUpdate('composing', jid);
-            await new Promise(r => setTimeout(r, 1500));
-
-            await Promise.race([
-                session.sock.sendMessage(jid, { text: message }),
-                sendTimeout
-            ]);
-
-            console.log(`[${mid}] Message sent ✓`);
-        } finally {
-            try {
-                await session.sock.sendPresenceUpdate('unavailable');
-            } catch (e) { }
-        }
+        await sendMessageInternal(session, mid, phone, message, type);
         res.json({ success: true });
-
     } catch (e) {
         console.error(`[${mid}] Send error:`, e.message);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+// ─── Notify: New Order ────────────────────────────────────────────────────────
+app.post('/notify/order', async (req, res) => {
+    const { merchantId, phone, customerName, orderId, total, status, storeName, currency } = req.body;
+    const mid = String(merchantId || '');
+
+    if (!mid || !phone || !orderId) {
+        return res.status(400).json({ success: false, error: 'merchantId, phone, orderId required' });
+    }
+
+    const session = sessions[mid];
+    if (!session) return res.status(400).json({ success: false, error: 'Session not started' });
+    if (session.status !== 'WORKING') return res.status(400).json({ success: false, error: 'Session not ready: ' + session.status });
+    if (!session.sock || !session.sock.user) {
+        session.status = 'RECONNECTING';
+        initSession(mid);
+        return res.status(400).json({ success: false, error: 'Socket disconnected — reconnecting' });
+    }
+
+    const name = customerName || 'عميلنا العزيز';
+    const totalStr = total ? `${total} ${currency || 'ر.س'}` : '';
+    const statusStr = status || 'جديد';
+    const store = storeName || 'متجرنا';
+
+    const message = `مرحباً ${name}،\n\nتم استلام طلبك #${orderId} بنجاح! ✅\nالإجمالي: ${totalStr}\nالحالة: ${statusStr}\n\nشكراً لتسوقك مع ${store}! 🛍️\n\nسنقوم بإعلامك بأي تحديثات على طلبك.`;
+
+    try {
+        await sendMessageInternal(session, mid, phone, message, 'order_notification');
+        res.json({ success: true });
+    } catch (e) {
+        console.error(`[${mid}] Notify order error:`, e.message);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+// ─── Send Reminder ────────────────────────────────────────────────────────────
+app.post('/send-reminder', async (req, res) => {
+    const { merchantId, phone, reminderType, customerName, orderId, total, currency, storeName } = req.body;
+    const mid = String(merchantId || '');
+
+    if (!mid || !phone || !orderId || !reminderType) {
+        return res.status(400).json({ success: false, error: 'merchantId, phone, orderId, reminderType required' });
+    }
+
+    const session = sessions[mid];
+    if (!session) return res.status(400).json({ success: false, error: 'Session not started' });
+    if (session.status !== 'WORKING') return res.status(400).json({ success: false, error: 'Session not ready: ' + session.status });
+    if (!session.sock || !session.sock.user) {
+        session.status = 'RECONNECTING';
+        initSession(mid);
+        return res.status(400).json({ success: false, error: 'Socket disconnected — reconnecting' });
+    }
+
+    const name = customerName || 'عميلنا العزيز';
+    const totalStr = total ? `${total} ${currency || 'ر.س'}` : '';
+    const store = storeName || 'متجرنا';
+
+    const templates = {
+        payment: `مرحباً ${name}،\n\nتذكير بخصوص طلبك #${orderId}.\nالإجمالي: ${totalStr}\n\nنود تذكيرك بإتمام عملية الدفع في حال لم تكن قد أنجزتها بعد. 💳\n\nشكراً لك، ${store}`,
+        shipping: `مرحباً ${name}،\n\nتذكير بخصوص طلبك #${orderId}.\nالإجمالي: ${totalStr}\n\nسيتم شحن طلبك قريباً. 🚚 سنوافيك بالتفاصيل فور التجهيز.\n\nشكراً لك، ${store}`,
+        review: `مرحباً ${name}،\n\nنأمل أنك راضٍ عن طلبك #${orderId}! ⭐\n\nنقدّر إذا تركت لنا تقييماً على المتجر. رأيك يهمنا.\n\nشكراً لك، ${store}`,
+        general: `مرحباً ${name}،\n\nتذكير بخصوص طلبك #${orderId}.\nالإجمالي: ${totalStr}\n\nإذا كانت لديك أي استفسارات، لا تتردد بالتواصل معنا. 📞\n\nشكراً لك، ${store}`,
+    };
+
+    const message = templates[reminderType] || templates['general'];
+
+    try {
+        await sendMessageInternal(session, mid, phone, message, 'reminder');
+        res.json({ success: true });
+    } catch (e) {
+        console.error(`[${mid}] Send reminder error:`, e.message);
         res.status(500).json({ success: false, error: e.message });
     }
 });
