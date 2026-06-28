@@ -609,7 +609,27 @@ app.get('/health', (req, res) => {
 
 // ─── Start Server ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`WA Bridge running on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`WA Bridge running on port ${PORT}`);
+    
+    // Auto-init existing sessions
+    try {
+        const sessionsDir = path.join(__dirname, 'sessions');
+        if (require('fs').existsSync(sessionsDir)) {
+            const dirs = require('fs').readdirSync(sessionsDir);
+            for (const d of dirs) {
+                if (d.startsWith('merchant_')) {
+                    const mid = d.replace('merchant_', '');
+                    console.log(`Auto-starting session for merchant ${mid}...`);
+                    sessions[mid] = { sock: null, store: null, status: 'STARTING', qr: null, reconnectAttempts: 0, lastError: null };
+                    initSession(mid);
+                }
+            }
+        }
+    } catch (e) {
+        console.error("Failed to auto-init sessions:", e.message);
+    }
+});
 
 // ─── Keep-Alive ───────────────────────────────────────────────────────────────
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
