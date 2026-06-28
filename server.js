@@ -76,7 +76,8 @@ function makeSimpleStore() {
                     
                     // Update chat details
                     this.chats[jid].conversationTimestamp = m.messageTimestamp || this.chats[jid].conversationTimestamp;
-                    if (m.pushName) {
+                    // Only set pushName if it's not a group chat and not sent by me and chat does not have a saved name yet
+                    if (m.pushName && !jid.endsWith('@g.us') && !m.key.fromMe && !this.chats[jid].name) {
                         this.chats[jid].name = m.pushName;
                     }
                     
@@ -633,12 +634,20 @@ app.get('/chats', (req, res) => {
         
         const mapped = chats.slice(0, 100).map(c => {
             const contact = sessions[mid].store.contacts[c.id];
-            // Phonebook name (from contacts.upsert) takes priority over pushName (self-set profile)
-            const contactName = contact ? (contact.name || contact.verifiedName || contact.notify) : null;
-            const name = contactName || c.name || c.verifiedName || null;
+            let resolvedName = null;
+            
+            if (c.id && c.id.endsWith('@g.us')) {
+                // Group chat: subject is group name
+                resolvedName = c.subject || c.name || 'مجموعة واتساب';
+            } else {
+                // Individual chat: phonebook contact name > verifiedName > notify > c.name
+                const contactName = contact ? (contact.name || contact.verifiedName || contact.notify) : null;
+                resolvedName = contactName || c.name || c.verifiedName || null;
+            }
+
             return {
                 id: c.id,
-                name: name,
+                name: resolvedName,
                 unreadCount: c.unreadCount || 0,
                 timestamp: c.conversationTimestamp || 0,
                 lastMessage: c.lastMessageRecvTimestamp,
