@@ -24,6 +24,7 @@ function makeSimpleStore() {
     return {
         chats: {},
         messages: {},
+        contacts: {},
         bind(ev) {
             ev.on('chats.set', ({ chats }) => {
                 for (const chat of chats) {
@@ -89,6 +90,49 @@ function makeSimpleStore() {
                     }
                 }
             });
+            ev.on('messages.update', (updates) => {
+                for (const { key, update } of updates) {
+                    const jid = key.remoteJid;
+                    if (this.messages[jid]) {
+                        const msg = this.messages[jid].find(m => m.key.id === key.id);
+                        if (msg) {
+                            Object.assign(msg, update);
+                        }
+                    }
+                }
+            });
+            ev.on('message-receipt.update', (updates) => {
+                for (const { key, receipt } of updates) {
+                    const jid = key.remoteJid;
+                    if (this.messages[jid]) {
+                        const msg = this.messages[jid].find(m => m.key.id === key.id);
+                        if (msg && receipt) {
+                            if (receipt.receiptTimestamp) {
+                                msg.status = 4; // Read
+                            } else {
+                                msg.status = 3; // Delivered
+                            }
+                        }
+                    }
+                }
+            });
+            ev.on('contacts.upsert', (contacts) => {
+                for (const contact of contacts) {
+                    this.contacts[contact.id] = contact;
+                }
+            });
+            ev.on('contacts.set', ({ contacts }) => {
+                for (const contact of contacts) {
+                    this.contacts[contact.id] = contact;
+                }
+            });
+            ev.on('contacts.update', (updates) => {
+                for (const update of updates) {
+                    if (this.contacts[update.id]) {
+                        this.contacts[update.id] = { ...this.contacts[update.id], ...update };
+                    }
+                }
+            });
         },
         readFromFile(path) {
             try {
@@ -97,6 +141,7 @@ function makeSimpleStore() {
                     const data = JSON.parse(fs.readFileSync(path, 'utf-8'));
                     this.chats = data.chats || {};
                     this.messages = data.messages || {};
+                    this.contacts = data.contacts || {};
                 }
             } catch (e) {
                 console.error("Store read error:", e.message);
@@ -104,7 +149,7 @@ function makeSimpleStore() {
         },
         writeToFile(path) {
             try {
-                require('fs').writeFileSync(path, JSON.stringify({ chats: this.chats, messages: this.messages }));
+                require('fs').writeFileSync(path, JSON.stringify({ chats: this.chats, messages: this.messages, contacts: this.contacts }));
             } catch (e) {}
         }
     };
@@ -507,13 +552,17 @@ app.get('/chats', (req, res) => {
             return t2 - t1;
         });
         
-        const mapped = chats.slice(0, 100).map(c => ({
-            id: c.id,
-            name: c.name || c.verifiedName || null,
-            unreadCount: c.unreadCount || 0,
-            timestamp: c.conversationTimestamp || 0,
-            lastMessage: c.lastMessageRecvTimestamp
-        }));
+        const mapped = chats.slice(0, 100).map(c => {
+            const contact = sessions[mid].store.contacts[c.id];
+            const name = c.name || (contact ? (contact.name || contact.verifiedName) : null) || c.verifiedName || null;
+            return {
+                id: c.id,
+                name: name,
+                unreadCount: c.unreadCount || 0,
+                timestamp: c.conversationTimestamp || 0,
+                lastMessage: c.lastMessageRecvTimestamp
+            };
+        });
 
         res.json({ success: true, chats: mapped });
     } catch (e) {
