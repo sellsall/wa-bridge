@@ -20,6 +20,64 @@ app.use((req, res, next) => {
     next();
 });
 
+function makeSimpleStore() {
+    return {
+        chats: {},
+        messages: {},
+        bind(ev) {
+            ev.on('chats.set', ({ chats }) => {
+                for (const chat of chats) {
+                    this.chats[chat.id] = { ...this.chats[chat.id], ...chat };
+                }
+            });
+            ev.on('chats.upsert', chats => {
+                for (const chat of chats) {
+                    this.chats[chat.id] = { ...this.chats[chat.id], ...chat };
+                }
+            });
+            ev.on('chats.update', updates => {
+                for (const update of updates) {
+                    if (this.chats[update.id]) {
+                        this.chats[update.id] = { ...this.chats[update.id], ...update };
+                    }
+                }
+            });
+            ev.on('messages.upsert', ({ messages, type }) => {
+                for (const m of messages) {
+                    const jid = m.key.remoteJid;
+                    if (!this.messages[jid]) this.messages[jid] = [];
+                    const idx = this.messages[jid].findIndex(msg => msg.key.id === m.key.id);
+                    if (idx > -1) this.messages[jid][idx] = m;
+                    else this.messages[jid].push(m);
+                    
+                    if (this.messages[jid].length > 100) this.messages[jid].shift();
+                    
+                    if (type === 'notify' && !m.key.fromMe && this.chats[jid]) {
+                        this.chats[jid].unreadCount = (this.chats[jid].unreadCount || 0) + 1;
+                    }
+                }
+            });
+        },
+        readFromFile(path) {
+            try {
+                const fs = require('fs');
+                if (fs.existsSync(path)) {
+                    const data = JSON.parse(fs.readFileSync(path, 'utf-8'));
+                    this.chats = data.chats || {};
+                    this.messages = data.messages || {};
+                }
+            } catch (e) {
+                console.error("Store read error:", e.message);
+            }
+        },
+        writeToFile(path) {
+            try {
+                require('fs').writeFileSync(path, JSON.stringify({ chats: this.chats, messages: this.messages }));
+            } catch (e) {}
+        }
+    };
+}
+
 const sessions = {};
 
 // ─── Start Session ────────────────────────────────────────────────────────────
@@ -51,7 +109,7 @@ async function initSession(mid) {
     try {
         const baileysModule = await import('@whiskeysockets/baileys');
         const makeWASocket = baileysModule.default;
-        const { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeInMemoryStore } = baileysModule;
+        const { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = baileysModule;
 
         const { version } = await fetchLatestBaileysVersion();
         console.log(`[${mid}] WA version: ${version}`);
@@ -59,15 +117,9 @@ async function initSession(mid) {
         const authDir = path.join(__dirname, 'sessions', 'merchant_' + mid);
         fs.mkdirSync(authDir, { recursive: true });
 
-        const store = makeInMemoryStore({ logger: pino({ level: 'silent' }) });
+        const store = makeSimpleStore();
         const storePath = path.join(authDir, 'baileys_store.json');
-        try {
-            if (fs.existsSync(storePath)) {
-                store.readFromFile(storePath);
-            }
-        } catch (e) {
-            console.error(`[${mid}] Failed to read store:`, e.message);
-        }
+        store.readFromFile(storePath);
         
         // Save store periodically
         const storeInterval = setInterval(() => {
@@ -401,19 +453,18 @@ app.get('/chats', (req, res) => {
         return res.json({ success: false, error: 'no store' });
     }
     try {
-        const chats = sessions[mid].store.chats.all();
-        // Return only essential data
-        const mapped = chats.map(c => ({
-            id: c.id,
-            name: c.name || c.verifiedName || null,
-            unreadCount: c.unreadCount || 0,
-            timestamp: c.conversationTimestamp || 0,
-            conversationTimestamp: c.conversationTimestamp,
-            lastMessage: c.lastMessageRecvTimestamp,
-        }));
-        // Sort by timestamp descending
-        mapped.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-        res.json({ success: true, chats: mapped });
+        const chatsObj = sessions[mid].store.chats || {};
+        // Convert object to array
+        const chats = Object.values(chatsObj);
+        
+        // Sort by most recent
+        chats.sort((a, b) => {
+            const t1 = a.conversationTimestamp || 0;
+            const t2 = b.conversationTimestamp || 0;
+            return t2 - t1;
+        });
+
+        res.json({ success: true, chats: chats.slice(0, 100) });
     } catch (e) {
         res.json({ success: false, error: e.message });
     }
@@ -430,8 +481,8 @@ app.get('/chats/:jid/messages', async (req, res) => {
     }
     
     try {
-        const messages = await sessions[mid].store.loadMessages(jid, limit);
-        res.json({ success: true, messages: messages || [] });
+        const msgs = sessions[mid].store.messages[jid] || [];
+        res.json({ success: true, messages: msgs.slice(-limit) });
     } catch (e) {
         res.json({ success: false, error: e.message });
     }
