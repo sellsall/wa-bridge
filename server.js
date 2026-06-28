@@ -7,6 +7,8 @@ const QRCode = require('qrcode');
 const pino = require('pino');
 const path = require('path');
 const fs = require('fs');
+const multer = require('multer');
+const upload = multer({ dest: 'uploads/' });
 
 const app = express();
 app.use(express.json());
@@ -638,6 +640,77 @@ app.get('/chats/:jid/messages', async (req, res) => {
         res.json({ success: true, messages: msgs.slice(-limit) });
     } catch (e) {
         res.json({ success: false, error: e.message });
+    }
+});
+
+// ─── Media Support ────────────────────────────────────────────────────────────
+app.get('/media/:merchantId/:jid/:msgId', async (req, res) => {
+    const { merchantId, jid, msgId } = req.params;
+    const session = sessions[merchantId];
+    if (!session || session.status !== 'WORKING') return res.status(404).send('No session');
+    
+    // Find message in store
+    const store = require('fs').existsSync(path.join(__dirname, 'sessions', 'merchant_' + merchantId, 'baileys_store.json')) 
+        ? JSON.parse(require('fs').readFileSync(path.join(__dirname, 'sessions', 'merchant_' + merchantId, 'baileys_store.json'))) 
+        : null;
+        
+    if (!store || !store.messages || !store.messages[jid]) return res.status(404).send('No messages');
+    const msg = store.messages[jid].find(m => m.key.id === msgId);
+    if (!msg) return res.status(404).send('Message not found');
+    
+    try {
+        const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
+        const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger });
+        
+        let mimetype = 'application/octet-stream';
+        if (msg.message?.imageMessage) mimetype = msg.message.imageMessage.mimetype;
+        else if (msg.message?.videoMessage) mimetype = msg.message.videoMessage.mimetype;
+        else if (msg.message?.audioMessage) mimetype = msg.message.audioMessage.mimetype;
+        else if (msg.message?.documentMessage) mimetype = msg.message.documentMessage.mimetype;
+        
+        res.set('Content-Type', mimetype);
+        res.send(buffer);
+    } catch (e) {
+        console.error('Media download error:', e);
+        res.status(500).send('Error downloading media');
+    }
+});
+
+app.post('/send-media', upload.single('file'), async (req, res) => {
+    const { merchantId, jid, type } = req.body;
+    const mid = String(merchantId || '');
+
+    if (!mid || !jid || !req.file) {
+        return res.status(400).json({ success: false, error: 'merchantId, jid, file required' });
+    }
+
+    const session = sessions[mid];
+    if (!session || session.status !== 'WORKING') {
+        return res.status(400).json({ success: false, error: 'Session not working' });
+    }
+
+    try {
+        const filePath = req.file.path;
+        let content = {};
+        if (type === 'video') {
+            content = { video: { url: filePath }, caption: req.body.caption || '' };
+        } else if (type === 'audio') {
+            content = { audio: { url: filePath }, ptt: true }; // ptt: voice note
+        } else if (type === 'document') {
+            content = { document: { url: filePath }, fileName: req.file.originalname, mimetype: req.file.mimetype };
+        } else {
+            content = { image: { url: filePath }, caption: req.body.caption || '' };
+        }
+
+        const msgInfo = await session.sock.sendMessage(jid, content);
+        
+        // Clean up temp file
+        fs.unlinkSync(filePath);
+        
+        res.json({ success: true, message: msgInfo });
+    } catch (e) {
+        if (req.file) fs.unlinkSync(req.file.path);
+        res.status(500).json({ success: false, error: e.message });
     }
 });
 
