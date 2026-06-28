@@ -109,10 +109,11 @@ function makeSimpleStore() {
                     if (this.messages[jid]) {
                         const msg = this.messages[jid].find(m => m.key.id === key.id);
                         if (msg && receipt) {
-                            if (receipt.receiptTimestamp) {
-                                msg.status = 4; // Read
-                            } else {
-                                msg.status = 3; // Delivered
+                            // Baileys receipt: readTimestamp = READ (status 5), receiptTimestamp = DELIVERED (status 4)
+                            if (receipt.readTimestamp) {
+                                msg.status = 5; // READ (blue ticks)
+                            } else if (receipt.receiptTimestamp) {
+                                msg.status = 4; // DELIVERED (gray double ticks)
                             }
                         }
                     }
@@ -632,7 +633,9 @@ app.get('/chats', (req, res) => {
         
         const mapped = chats.slice(0, 100).map(c => {
             const contact = sessions[mid].store.contacts[c.id];
-            const name = c.name || (contact ? (contact.name || contact.verifiedName) : null) || c.verifiedName || null;
+            // Phonebook name (from contacts.upsert) takes priority over pushName (self-set profile)
+            const contactName = contact ? (contact.name || contact.verifiedName || contact.notify) : null;
+            const name = contactName || c.name || c.verifiedName || null;
             return {
                 id: c.id,
                 name: name,
