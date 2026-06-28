@@ -61,6 +61,22 @@ function makeSimpleStore() {
             ev.on('messages.upsert', ({ messages, type }) => {
                 for (const m of messages) {
                     const jid = m.key.remoteJid;
+                    
+                    // Ensure chat exists
+                    if (!this.chats[jid]) {
+                        this.chats[jid] = { 
+                            id: jid, 
+                            unreadCount: 0, 
+                            conversationTimestamp: m.messageTimestamp || Math.floor(Date.now()/1000)
+                        };
+                    }
+                    
+                    // Update chat details
+                    this.chats[jid].conversationTimestamp = m.messageTimestamp || this.chats[jid].conversationTimestamp;
+                    if (m.pushName) {
+                        this.chats[jid].name = m.pushName;
+                    }
+                    
                     if (!this.messages[jid]) this.messages[jid] = [];
                     const idx = this.messages[jid].findIndex(msg => msg.key.id === m.key.id);
                     if (idx > -1) this.messages[jid][idx] = m;
@@ -68,7 +84,7 @@ function makeSimpleStore() {
                     
                     if (this.messages[jid].length > 100) this.messages[jid].shift();
                     
-                    if (type === 'notify' && !m.key.fromMe && this.chats[jid]) {
+                    if (type === 'notify' && !m.key.fromMe) {
                         this.chats[jid].unreadCount = (this.chats[jid].unreadCount || 0) + 1;
                     }
                 }
@@ -157,7 +173,7 @@ async function initSession(mid) {
             keepAliveIntervalMs: 15000,
             retryRequestDelayMs: 2000,
             markOnlineOnConnect: false,
-            syncFullHistory: false,
+            syncFullHistory: true,
             getMessage: async (key) => {
                 if (store) {
                     const msg = await store.loadMessage(key.remoteJid, key.id);
