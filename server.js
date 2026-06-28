@@ -365,6 +365,28 @@ function normalizePhone(phone) {
     return hasPrefix ? normalized : '966' + normalized.replace(/^0+/, '');
 }
 
+function resolveContact(mid, jid) {
+    if (!sessions[mid] || !sessions[mid].store || !jid) return null;
+    const store = sessions[mid].store;
+    let contact = store.contacts[jid];
+    if (!contact && jid.endsWith('@lid')) {
+        contact = Object.values(store.contacts).find(c => c.lid === jid || c.id === jid);
+    }
+    if (!contact && jid.endsWith('@s.whatsapp.net')) {
+        contact = Object.values(store.contacts).find(c => c.id === jid || c.phoneNumber === jid || (c.id && c.id.split('@')[0] === jid.split('@')[0]));
+    }
+    return contact;
+}
+
+function getTimestamp(m) {
+    if (!m || !m.messageTimestamp) return 0;
+    let ts = m.messageTimestamp;
+    if (typeof ts === 'object') {
+        ts = ts.low || ts.seconds || 0;
+    }
+    return Number(ts) || 0;
+}
+
 // إعدادات ذكية لتجنب الحظر (Anti-Ban) تناسب جميع أنواع الإشعارات بما فيها المايسترو
 async function sendMessageInternal(session, mid, phone, message, type) {
     const fullNumber = normalizePhone(phone);
@@ -633,10 +655,17 @@ app.get('/chats', (req, res) => {
         });
         
         const mapped = chats.slice(0, 100).map(c => {
-            const contact = sessions[mid].store.contacts[c.id];
+            const jid = c.id;
+            const contact = resolveContact(mid, jid);
+            let realPhoneJid = jid;
+            if (jid && jid.endsWith('@lid')) {
+                if (contact && (contact.id?.endsWith('@s.whatsapp.net') || contact.phoneNumber)) {
+                    realPhoneJid = contact.id?.endsWith('@s.whatsapp.net') ? contact.id : (contact.phoneNumber + '@s.whatsapp.net');
+                }
+            }
+
             let resolvedName = null;
-            
-            if (c.id && c.id.endsWith('@g.us')) {
+            if (jid && jid.endsWith('@g.us')) {
                 // Group chat: subject is group name
                 resolvedName = c.subject || c.name || 'مجموعة واتساب';
             } else {
@@ -646,7 +675,8 @@ app.get('/chats', (req, res) => {
             }
 
             return {
-                id: c.id,
+                id: jid,
+                phoneJid: realPhoneJid,
                 name: resolvedName,
                 unreadCount: c.unreadCount || 0,
                 timestamp: c.conversationTimestamp || 0,
@@ -665,14 +695,31 @@ app.get('/chats', (req, res) => {
 app.get('/chats/:jid/messages', async (req, res) => {
     const mid = String(req.query.merchantId || '');
     const { jid } = req.params;
-    const limit = parseInt(req.query.limit) || 50;
+    const limit = parseInt(req.query.limit) || 100;
     
     if (!sessions[mid] || !sessions[mid].store) {
         return res.json({ success: false, error: 'no store' });
     }
     
     try {
-        const msgs = sessions[mid].store.messages[jid] || [];
+        let msgs = [...(sessions[mid].store.messages[jid] || [])];
+        
+        // Combine with alternate JID (e.g. LID vs phone number JID) if present
+        const contact = resolveContact(mid, jid);
+        if (contact) {
+            const altJid = (jid.endsWith('@lid') ? contact.id : contact.lid);
+            if (altJid && altJid !== jid && sessions[mid].store.messages[altJid]) {
+                const altMsgs = sessions[mid].store.messages[altJid];
+                const msgMap = new Map();
+                msgs.forEach(m => { if (m?.key?.id) msgMap.set(m.key.id, m); });
+                altMsgs.forEach(m => { if (m?.key?.id) msgMap.set(m.key.id, m); });
+                msgs = Array.from(msgMap.values());
+            }
+        }
+
+        // Sort accurately by timestamp
+        msgs.sort((a, b) => getTimestamp(a) - getTimestamp(b));
+
         res.json({ success: true, messages: msgs.slice(-limit) });
     } catch (e) {
         res.json({ success: false, error: e.message });
