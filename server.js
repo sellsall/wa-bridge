@@ -133,6 +133,11 @@ function makeSimpleStore() {
                     }
                 }
             });
+            ev.on('presence.update', (update) => {
+                const jid = update.id;
+                if (!this.contacts[jid]) this.contacts[jid] = { id: jid };
+                this.contacts[jid].presence = update.presences;
+            });
         },
         readFromFile(path) {
             try {
@@ -233,6 +238,20 @@ async function initSession(mid) {
         sessions[mid].sock = sock;
         sessions[mid].store = store;
         sessions[mid].storeInterval = storeInterval;
+        
+        sock.ev.on('messages.upsert', async ({ messages, type }) => {
+            if (type === 'notify') {
+                for (const m of messages) {
+                    if (!m.key.fromMe) {
+                        try {
+                            await sock.readMessages([m.key]);
+                        } catch (e) {
+                            console.error(`[${mid}] Auto-read error:`, e.message);
+                        }
+                    }
+                }
+            }
+        });
 
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
@@ -510,6 +529,39 @@ app.post('/session/presence', async (req, res) => {
     }
 });
 
+// ─── Send Typing Presence ────────────────────────────────────────────────────────
+app.post('/send-presence', async (req, res) => {
+    const { merchantId, jid, presence } = req.body;
+    const mid = String(merchantId || '');
+    const sess = sessions[mid];
+
+    if (!sess) return res.json({ success: false, error: 'no session' });
+    if (!sess.sock) return res.json({ success: false, error: 'not connected' });
+    if (!jid) return res.json({ success: false, error: 'jid required' });
+
+    try {
+        await sess.sock.sendPresenceUpdate(presence || 'composing', jid);
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false, error: e.message });
+    }
+});
+
+app.post('/subscribe-presence', async (req, res) => {
+    const { merchantId, jid } = req.body;
+    const mid = String(merchantId || '');
+    const sess = sessions[mid];
+    
+    if (!sess || !sess.sock || !jid) return res.json({ success: false });
+    
+    try {
+        await sess.sock.presenceSubscribe(jid);
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false });
+    }
+});
+
 // ─── Session Me (connected phone) ────────────────────────────────────────────
 app.get('/session/me', (req, res) => {
     const mid = String(req.query.merchantId || '');
@@ -560,7 +612,8 @@ app.get('/chats', (req, res) => {
                 name: name,
                 unreadCount: c.unreadCount || 0,
                 timestamp: c.conversationTimestamp || 0,
-                lastMessage: c.lastMessageRecvTimestamp
+                lastMessage: c.lastMessageRecvTimestamp,
+                presence: contact ? contact.presence : null
             };
         });
 
