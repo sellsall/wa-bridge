@@ -796,12 +796,15 @@ app.post('/read-chat', async (req, res) => {
     try {
         if (session.store && session.store.messages[jid]) {
             // Find unread incoming messages and mark them read
-            const unreadMsgs = session.store.messages[jid].filter(m => !m.key.fromMe);
-            for (const m of unreadMsgs) {
+            const unreadMsgs = session.store.messages[jid].filter(m => !m.key.fromMe && m.status !== 5);
+            if (unreadMsgs.length > 0) {
+                const keys = unreadMsgs.map(m => m.key);
                 try {
-                    await session.sock.readMessages([m.key]);
-                } catch (e) { /* ignore per-message errors */ }
-                m.status = 4; // Mark read locally
+                    await session.sock.readMessages(keys);
+                } catch (e) { /* ignore */ }
+                for (const m of unreadMsgs) {
+                    m.status = 5; // Mark read locally (5 = READ)
+                }
             }
         }
         // Always reset the unreadCount in the chat store
