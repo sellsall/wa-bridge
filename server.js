@@ -259,7 +259,7 @@ async function initSession(mid) {
                         const formData = new FormData();
                         formData.append('file', new Blob([buffer]), 'media.' + ext);
                         
-                        const res = await fetch('http://localhost/api/wa-chats/cache-media', {
+                        const res = await fetch('http://127.0.0.1/api/wa-chats/cache-media', {
                             method: 'POST',
                             headers: { 'X-Bridge-Key': 'saddara_wa_bridge_2025' },
                             body: formData
