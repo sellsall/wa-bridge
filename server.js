@@ -269,7 +269,7 @@ async function initSession(mid) {
                         if (data && data.success) {
                             m.r2Url = data.url;
                             // Update store since m is already in store
-                            const storeMsg = session.store.messages[m.key.remoteJid]?.find(sm => sm.key.id === m.key.id);
+                            const storeMsg = sessions[mid].store.messages[m.key.remoteJid]?.find(sm => sm.key.id === m.key.id);
                             if (storeMsg) storeMsg.r2Url = data.url;
                         }
                     } catch (e) {
@@ -783,12 +783,18 @@ app.post('/read-chat', async (req, res) => {
 
     try {
         if (session.store && session.store.messages[jid]) {
-            // Find unread incoming messages
-            const unreadMsgs = session.store.messages[jid].filter(m => !m.key.fromMe && !m.status);
+            // Find unread incoming messages and mark them read
+            const unreadMsgs = session.store.messages[jid].filter(m => !m.key.fromMe);
             for (const m of unreadMsgs) {
-                await session.sock.readMessages([m.key]);
+                try {
+                    await session.sock.readMessages([m.key]);
+                } catch (e) { /* ignore per-message errors */ }
                 m.status = 4; // Mark read locally
             }
+        }
+        // Always reset the unreadCount in the chat store
+        if (session.store && session.store.chats[jid]) {
+            session.store.chats[jid].unreadCount = 0;
         }
         res.json({ success: true });
     } catch (e) {
