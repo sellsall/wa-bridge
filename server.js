@@ -242,7 +242,7 @@ async function initSession(mid) {
             keepAliveIntervalMs: 15000,
             retryRequestDelayMs: 2000,
             markOnlineOnConnect: false,
-            syncFullHistory: true,
+            syncFullHistory: false,
             getMessage: async (key) => {
                 if (store) {
                     const msg = await store.loadMessage(key.remoteJid, key.id);
