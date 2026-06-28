@@ -242,17 +242,7 @@ async function initSession(mid) {
         sessions[mid].storeInterval = storeInterval;
         
         sock.ev.on('messages.upsert', async ({ messages, type }) => {
-            if (type === 'notify') {
-                for (const m of messages) {
-                    if (!m.key.fromMe) {
-                        try {
-                            await sock.readMessages([m.key]);
-                        } catch (e) {
-                            console.error(`[${mid}] Auto-read error:`, e.message);
-                        }
-                    }
-                }
-            }
+            // Auto-read removed to prevent sending blue ticks prematurely
         });
 
         sock.ev.on('connection.update', async (update) => {
@@ -649,14 +639,10 @@ app.get('/media/:merchantId/:jid/:msgId', async (req, res) => {
     const session = sessions[merchantId];
     if (!session || session.status !== 'WORKING') return res.status(404).send('No session');
     
-    // Find message in store
-    const store = require('fs').existsSync(path.join(__dirname, 'sessions', 'merchant_' + merchantId, 'baileys_store.json')) 
-        ? JSON.parse(require('fs').readFileSync(path.join(__dirname, 'sessions', 'merchant_' + merchantId, 'baileys_store.json'))) 
-        : null;
-        
-    if (!store || !store.messages || !store.messages[jid]) return res.status(404).send('No messages');
-    const msg = store.messages[jid].find(m => m.key.id === msgId);
-    if (!msg) return res.status(404).send('Message not found');
+    // Find message in RAM store
+    if (!session.store || !session.store.messages || !session.store.messages[jid]) return res.status(404).send('No messages for JID');
+    const msg = session.store.messages[jid].find(m => m.key.id === msgId);
+    if (!msg) return res.status(404).send('Message not found in store');
     
     try {
         const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
@@ -668,6 +654,9 @@ app.get('/media/:merchantId/:jid/:msgId', async (req, res) => {
         else if (msg.message?.audioMessage) mimetype = msg.message.audioMessage.mimetype;
         else if (msg.message?.documentMessage) mimetype = msg.message.documentMessage.mimetype;
         
+        // Ensure standard audio types if it's a voice note for browser playback
+        if (mimetype.includes('audio/ogg') || mimetype.includes('audio/mp4')) mimetype = 'audio/ogg';
+
         res.set('Content-Type', mimetype);
         res.send(buffer);
     } catch (e) {
@@ -691,25 +680,34 @@ app.post('/send-media', upload.single('file'), async (req, res) => {
 
     try {
         const filePath = req.file.path;
+        const fileBuffer = require('fs').readFileSync(filePath);
+        
         let content = {};
         if (type === 'video') {
-            content = { video: { url: filePath }, caption: req.body.caption || '' };
+            content = { video: fileBuffer, caption: req.body.caption || '' };
         } else if (type === 'audio') {
-            content = { audio: { url: filePath }, ptt: true }; // ptt: voice note
+            content = { audio: fileBuffer, ptt: true }; // ptt: voice note
         } else if (type === 'document') {
-            content = { document: { url: filePath }, fileName: req.file.originalname, mimetype: req.file.mimetype };
+            content = { document: fileBuffer, fileName: req.file.originalname, mimetype: req.file.mimetype };
         } else {
-            content = { image: { url: filePath }, caption: req.body.caption || '' };
+            content = { image: fileBuffer, caption: req.body.caption || '' };
         }
 
         const msgInfo = await session.sock.sendMessage(jid, content);
         
+        // Add to RAM store immediately with status 2 (SENT) so UI shows single tick
+        msgInfo.status = 2;
+        if (!session.store.messages[jid]) session.store.messages[jid] = [];
+        session.store.messages[jid].push(msgInfo);
+
         // Clean up temp file
-        fs.unlinkSync(filePath);
+        try { fs.unlinkSync(filePath); } catch(e){}
         
         res.json({ success: true, message: msgInfo });
     } catch (e) {
-        if (req.file) fs.unlinkSync(req.file.path);
+        if (req.file) {
+            try { fs.unlinkSync(req.file.path); } catch(e){}
+        }
         res.status(500).json({ success: false, error: e.message });
     }
 });
@@ -734,7 +732,38 @@ app.post('/send-chat', async (req, res) => {
         await session.sock.sendPresenceUpdate('paused', jid);
         
         const msgInfo = await session.sock.sendMessage(jid, { text: message });
+        
+        // Add to RAM store immediately with status 2 (SENT) so UI shows single tick
+        msgInfo.status = 2;
+        if (!session.store.messages[jid]) session.store.messages[jid] = [];
+        session.store.messages[jid].push(msgInfo);
+
         res.json({ success: true, message: msgInfo });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+// ─── Read Chat Messages ──────────────────────────────────────────────────────
+app.post('/read-chat', async (req, res) => {
+    const { merchantId, jid } = req.body;
+    const mid = String(merchantId || '');
+
+    if (!mid || !jid) return res.status(400).json({ success: false, error: 'merchantId, jid required' });
+
+    const session = sessions[mid];
+    if (!session || session.status !== 'WORKING') return res.status(400).json({ success: false, error: 'Session not working' });
+
+    try {
+        if (session.store && session.store.messages[jid]) {
+            // Find unread incoming messages
+            const unreadMsgs = session.store.messages[jid].filter(m => !m.key.fromMe && !m.status);
+            for (const m of unreadMsgs) {
+                await session.sock.readMessages([m.key]);
+                m.status = 4; // Mark read locally
+            }
+        }
+        res.json({ success: true });
     } catch (e) {
         res.status(500).json({ success: false, error: e.message });
     }
