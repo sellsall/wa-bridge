@@ -27,6 +27,18 @@ function makeSimpleStore() {
         chats: {},
         messages: {},
         contacts: {},
+        lidToPn: {},
+        pnToLid: {},
+        updateContactMap(contact) {
+            if (!contact) return;
+            const id = contact.id || '';
+            const lid = contact.lid || (id.endsWith('@lid') ? id : null);
+            let pn = contact.phoneNumber ? (contact.phoneNumber + '@s.whatsapp.net') : (id.endsWith('@s.whatsapp.net') ? id : null);
+            if (lid && pn) {
+                this.lidToPn[lid] = pn;
+                this.pnToLid[pn] = lid;
+            }
+        },
         bind(ev) {
             ev.on('chats.set', ({ chats }) => {
                 for (const chat of chats) {
@@ -123,17 +135,20 @@ function makeSimpleStore() {
             ev.on('contacts.upsert', (contacts) => {
                 for (const contact of contacts) {
                     this.contacts[contact.id] = contact;
+                    this.updateContactMap(contact);
                 }
             });
             ev.on('contacts.set', ({ contacts }) => {
                 for (const contact of contacts) {
                     this.contacts[contact.id] = contact;
+                    this.updateContactMap(contact);
                 }
             });
             ev.on('contacts.update', (updates) => {
                 for (const update of updates) {
                     if (this.contacts[update.id]) {
                         this.contacts[update.id] = { ...this.contacts[update.id], ...update };
+                        this.updateContactMap(this.contacts[update.id]);
                     }
                 }
             });
@@ -370,12 +385,14 @@ function resolveContact(mid, jid) {
     const store = sessions[mid].store;
     let contact = store.contacts[jid];
     if (!contact && jid.endsWith('@lid')) {
-        contact = Object.values(store.contacts).find(c => c.lid === jid || c.id === jid);
+        const pn = store.lidToPn[jid];
+        if (pn) contact = store.contacts[pn];
     }
     if (!contact && jid.endsWith('@s.whatsapp.net')) {
-        contact = Object.values(store.contacts).find(c => c.id === jid || c.phoneNumber === jid || (c.id && c.id.split('@')[0] === jid.split('@')[0]));
+        const lid = store.pnToLid[jid];
+        if (lid) contact = store.contacts[lid];
     }
-    return contact;
+    return contact || null;
 }
 
 function getTimestamp(m) {
