@@ -30,6 +30,22 @@ function makeSimpleStore() {
                     this.chats[chat.id] = { ...this.chats[chat.id], ...chat };
                 }
             });
+            ev.on('messaging-history.set', ({ chats, messages }) => {
+                if (chats) {
+                    for (const chat of chats) {
+                        this.chats[chat.id] = { ...this.chats[chat.id], ...chat };
+                    }
+                }
+                if (messages) {
+                    for (const m of messages) {
+                        const jid = m.key.remoteJid;
+                        if (!this.messages[jid]) this.messages[jid] = [];
+                        const idx = this.messages[jid].findIndex(msg => msg.key.id === m.key.id);
+                        if (idx > -1) this.messages[jid][idx] = m;
+                        else this.messages[jid].push(m);
+                    }
+                }
+            });
             ev.on('chats.upsert', chats => {
                 for (const chat of chats) {
                     this.chats[chat.id] = { ...this.chats[chat.id], ...chat };
