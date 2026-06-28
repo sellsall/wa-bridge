@@ -61,7 +61,13 @@ async function initSession(mid) {
 
         const store = makeInMemoryStore({ logger: pino({ level: 'silent' }) });
         const storePath = path.join(authDir, 'baileys_store.json');
-        store.readFromFile(storePath);
+        try {
+            if (fs.existsSync(storePath)) {
+                store.readFromFile(storePath);
+            }
+        } catch (e) {
+            console.error(`[${mid}] Failed to read store:`, e.message);
+        }
         
         // Save store periodically
         const storeInterval = setInterval(() => {
