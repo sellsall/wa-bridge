@@ -243,6 +243,40 @@ async function initSession(mid) {
         
         sock.ev.on('messages.upsert', async ({ messages, type }) => {
             // Auto-read removed to prevent sending blue ticks prematurely
+            for (const m of messages) {
+                if (!m.key.fromMe && (m.message?.imageMessage || m.message?.videoMessage || m.message?.audioMessage || m.message?.documentMessage)) {
+                    // Upload incoming media to R2 via PHP cache-media webhook
+                    try {
+                        const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
+                        const buffer = await downloadMediaMessage(m, 'buffer', {}, { logger });
+                        
+                        let ext = 'bin';
+                        if (m.message.imageMessage) ext = 'jpg';
+                        else if (m.message.videoMessage) ext = 'mp4';
+                        else if (m.message.audioMessage) ext = 'ogg';
+                        else if (m.message.documentMessage) ext = m.message.documentMessage.fileName?.split('.').pop() || 'pdf';
+                        
+                        const formData = new FormData();
+                        formData.append('file', new Blob([buffer]), 'media.' + ext);
+                        
+                        const res = await fetch('http://localhost/api/wa-chats/cache-media', {
+                            method: 'POST',
+                            headers: { 'X-Bridge-Key': 'saddara_wa_bridge_2025' },
+                            body: formData
+                        });
+                        
+                        const data = await res.json();
+                        if (data && data.success) {
+                            m.r2Url = data.url;
+                            // Update store since m is already in store
+                            const storeMsg = session.store.messages[m.key.remoteJid]?.find(sm => sm.key.id === m.key.id);
+                            if (storeMsg) storeMsg.r2Url = data.url;
+                        }
+                    } catch (e) {
+                        console.error(`[${mid}] Error caching media to R2:`, e.message);
+                    }
+                }
+            }
         });
 
         sock.ev.on('connection.update', async (update) => {
@@ -665,12 +699,13 @@ app.get('/media/:merchantId/:jid/:msgId', async (req, res) => {
     }
 });
 
-app.post('/send-media', upload.single('file'), async (req, res) => {
-    const { merchantId, jid, type } = req.body;
+app.post('/send-media', async (req, res) => {
+    // Note: No longer using upload.single('file') because PHP handles R2 upload and passes URL
+    const { merchantId, jid, type, caption, url, mimetype, fileName } = req.body;
     const mid = String(merchantId || '');
 
-    if (!mid || !jid || !req.file) {
-        return res.status(400).json({ success: false, error: 'merchantId, jid, file required' });
+    if (!mid || !jid || !url) {
+        return res.status(400).json({ success: false, error: 'merchantId, jid, url required' });
     }
 
     const session = sessions[mid];
@@ -679,35 +714,27 @@ app.post('/send-media', upload.single('file'), async (req, res) => {
     }
 
     try {
-        const filePath = req.file.path;
-        const fileBuffer = require('fs').readFileSync(filePath);
-        
         let content = {};
         if (type === 'video') {
-            content = { video: fileBuffer, caption: req.body.caption || '' };
+            content = { video: { url }, caption: caption || '' };
         } else if (type === 'audio') {
-            content = { audio: fileBuffer, ptt: true }; // ptt: voice note
+            content = { audio: { url }, ptt: true }; // ptt: voice note
         } else if (type === 'document') {
-            content = { document: fileBuffer, fileName: req.file.originalname, mimetype: req.file.mimetype };
+            content = { document: { url }, fileName: fileName || 'file', mimetype: mimetype || 'application/pdf' };
         } else {
-            content = { image: fileBuffer, caption: req.body.caption || '' };
+            content = { image: { url }, caption: caption || '' };
         }
 
         const msgInfo = await session.sock.sendMessage(jid, content);
         
         // Add to RAM store immediately with status 2 (SENT) so UI shows single tick
         msgInfo.status = 2;
+        msgInfo.r2Url = url; // Save R2 URL for UI
         if (!session.store.messages[jid]) session.store.messages[jid] = [];
         session.store.messages[jid].push(msgInfo);
-
-        // Clean up temp file
-        try { fs.unlinkSync(filePath); } catch(e){}
         
         res.json({ success: true, message: msgInfo });
     } catch (e) {
-        if (req.file) {
-            try { fs.unlinkSync(req.file.path); } catch(e){}
-        }
         res.status(500).json({ success: false, error: e.message });
     }
 });
