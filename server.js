@@ -464,10 +464,21 @@ app.get('/session/me', (req, res) => {
 
 // ─── Fetch Chats ─────────────────────────────────────────────────────────────
 app.get('/chats', (req, res) => {
-    const mid = String(req.query.merchantId || '');
+    const mid = String(req.query.merchantId);
     if (!sessions[mid] || !sessions[mid].store) {
         return res.json({ success: false, error: 'no store' });
     }
+    
+    // Debug info
+    if (req.query.debug === '1') {
+        return res.json({
+            success: true,
+            chatsCount: Object.keys(sessions[mid].store.chats || {}).length,
+            messagesCount: Object.keys(sessions[mid].store.messages || {}).length,
+            sampleChat: Object.values(sessions[mid].store.chats || {})[0] || null
+        });
+    }
+
     try {
         const chatsObj = sessions[mid].store.chats || {};
         // Convert object to array
@@ -479,8 +490,16 @@ app.get('/chats', (req, res) => {
             const t2 = b.conversationTimestamp || 0;
             return t2 - t1;
         });
+        
+        const mapped = chats.slice(0, 100).map(c => ({
+            id: c.id,
+            name: c.name || c.verifiedName || null,
+            unreadCount: c.unreadCount || 0,
+            timestamp: c.conversationTimestamp || 0,
+            lastMessage: c.lastMessageRecvTimestamp
+        }));
 
-        res.json({ success: true, chats: chats.slice(0, 100) });
+        res.json({ success: true, chats: mapped });
     } catch (e) {
         res.json({ success: false, error: e.message });
     }
