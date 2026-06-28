@@ -41,7 +41,7 @@ app.post('/session/start', async (req, res) => {
         delete sessions[mid];
     }
 
-    sessions[mid] = { sock: null, status: 'STARTING', qr: null, reconnectAttempts: 0, lastError: null };
+    sessions[mid] = { sock: null, store: null, status: 'STARTING', qr: null, reconnectAttempts: 0, lastError: null };
     res.json({ success: true, status: 'STARTING' });
     initSession(mid);
 });
@@ -51,13 +51,24 @@ async function initSession(mid) {
     try {
         const baileysModule = await import('@whiskeysockets/baileys');
         const makeWASocket = baileysModule.default;
-        const { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = baileysModule;
+        const { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeInMemoryStore } = baileysModule;
 
         const { version } = await fetchLatestBaileysVersion();
         console.log(`[${mid}] WA version: ${version}`);
 
         const authDir = path.join(__dirname, 'sessions', 'merchant_' + mid);
         fs.mkdirSync(authDir, { recursive: true });
+
+        const store = makeInMemoryStore({ logger: pino({ level: 'silent' }) });
+        const storePath = path.join(authDir, 'baileys_store.json');
+        store.readFromFile(storePath);
+        
+        // Save store periodically
+        const storeInterval = setInterval(() => {
+            if (sessions[mid]?.status === 'WORKING') {
+                store.writeToFile(storePath);
+            }
+        }, 10_000);
 
         const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
@@ -73,9 +84,20 @@ async function initSession(mid) {
             retryRequestDelayMs: 2000,
             markOnlineOnConnect: false,
             syncFullHistory: false,
+            getMessage: async (key) => {
+                if (store) {
+                    const msg = await store.loadMessage(key.remoteJid, key.id);
+                    return msg?.message || undefined;
+                }
+                return undefined;
+            }
         });
 
+        store.bind(sock.ev);
+
         sessions[mid].sock = sock;
+        sessions[mid].store = store;
+        sessions[mid].storeInterval = storeInterval;
 
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
@@ -110,6 +132,7 @@ async function initSession(mid) {
                 if (loggedOut) {
                     sessions[mid].status = 'STOPPED';
                     sessions[mid].qr = null;
+                    clearInterval(sessions[mid].storeInterval);
                     const authDir = path.join(__dirname, 'sessions', 'merchant_' + mid);
                     try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) { }
                     return;
@@ -121,6 +144,7 @@ async function initSession(mid) {
                     console.log(`[${mid}] Max reconnects — STOPPED`);
                     sessions[mid].status = 'STOPPED';
                     sessions[mid].qr = null;
+                    clearInterval(sessions[mid].storeInterval);
                     const authDir = path.join(__dirname, 'sessions', 'merchant_' + mid);
                     try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) { }
                 } else {
@@ -186,19 +210,19 @@ async function sendMessageInternal(session, mid, phone, message, type) {
     try {
         // 2. محاكاة التواجد البشري (Presence Simulation)
         await session.sock.sendPresenceUpdate('available');
-        
+
         // تأخير عشوائي قبل قراءة المحادثة (1 إلى 2.5 ثانية)
         const readDelay = Math.floor(Math.random() * 1500) + 1000;
         await new Promise(r => setTimeout(r, readDelay));
 
         // 3. محاكاة الكتابة بناءً على طول الرسالة (Typing Simulation)
         await session.sock.sendPresenceUpdate('composing', jid);
-        
+
         const chars = message.length;
         // حساب مدة الكتابة: 30 مللي ثانية لكل حرف، بحد أدنى ثانيتين وحد أقصى 8 ثواني
         const typingDelay = Math.min(Math.max((chars * 30) + (Math.random() * 1000), 2000), 8000);
         await new Promise(r => setTimeout(r, typingDelay));
-        
+
         // محاكاة التوقف قليلاً قبل الإرسال (مراجعة الرسالة)
         await session.sock.sendPresenceUpdate('paused', jid);
         await new Promise(r => setTimeout(r, 500 + Math.random() * 500));
@@ -364,6 +388,75 @@ app.get('/session/me', (req, res) => {
     res.json({ success: true, phone });
 });
 
+// ─── Fetch Chats ─────────────────────────────────────────────────────────────
+app.get('/chats', (req, res) => {
+    const mid = String(req.query.merchantId || '');
+    if (!sessions[mid] || !sessions[mid].store) {
+        return res.json({ success: false, error: 'no store' });
+    }
+    try {
+        const chats = sessions[mid].store.chats.all();
+        // Return only essential data
+        const mapped = chats.map(c => ({
+            id: c.id,
+            name: c.name || c.verifiedName || null,
+            unreadCount: c.unreadCount || 0,
+            timestamp: c.conversationTimestamp || 0,
+            conversationTimestamp: c.conversationTimestamp,
+            lastMessage: c.lastMessageRecvTimestamp,
+        }));
+        // Sort by timestamp descending
+        mapped.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        res.json({ success: true, chats: mapped });
+    } catch (e) {
+        res.json({ success: false, error: e.message });
+    }
+});
+
+// ─── Fetch Messages ──────────────────────────────────────────────────────────
+app.get('/chats/:jid/messages', async (req, res) => {
+    const mid = String(req.query.merchantId || '');
+    const { jid } = req.params;
+    const limit = parseInt(req.query.limit) || 50;
+    
+    if (!sessions[mid] || !sessions[mid].store) {
+        return res.json({ success: false, error: 'no store' });
+    }
+    
+    try {
+        const messages = await sessions[mid].store.loadMessages(jid, limit);
+        res.json({ success: true, messages: messages || [] });
+    } catch (e) {
+        res.json({ success: false, error: e.message });
+    }
+});
+
+// ─── Send Chat Message ───────────────────────────────────────────────────────
+app.post('/send-chat', async (req, res) => {
+    const { merchantId, jid, message } = req.body;
+    const mid = String(merchantId || '');
+
+    if (!mid || !jid || !message) {
+        return res.status(400).json({ success: false, error: 'merchantId, jid, message required' });
+    }
+
+    const session = sessions[mid];
+    if (!session || session.status !== 'WORKING') {
+        return res.status(400).json({ success: false, error: 'Session not working' });
+    }
+
+    try {
+        await session.sock.sendPresenceUpdate('composing', jid);
+        await new Promise(r => setTimeout(r, 500));
+        await session.sock.sendPresenceUpdate('paused', jid);
+        
+        const msgInfo = await session.sock.sendMessage(jid, { text: message });
+        res.json({ success: true, message: msgInfo });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
 // ─── QR ──────────────────────────────────────────────────────────────────────
 app.get('/session/qr', (req, res) => {
     const mid = String(req.query.merchantId || '');
@@ -399,6 +492,8 @@ app.post('/session/logout', async (req, res) => {
 
     try { sessions[mid].sock?.ev?.removeAllListeners(); } catch (e) { }
     try { await sessions[mid].sock?.logout(); } catch (e) { }
+
+    clearInterval(sessions[mid].storeInterval);
 
     const authDir = path.join(__dirname, 'sessions', 'merchant_' + mid);
     try { fs.rmSync(authDir, { recursive: true, force: true }); } catch (e) { }
