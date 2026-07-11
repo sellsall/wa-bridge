@@ -65,14 +65,17 @@ async function initSession(mid) {
             version,
             auth: state,
             logger,
-            browser: ['Saddara', 'Chrome', '120.0.6099.109'],
+            // استخدام Baileys كـ WhatsApp Desktop لضمان استلام الرسائل بدون انتظار
+            browser: baileysModule.Browsers?.macOS('Desktop') || ['Mac OS X', 'Chrome', '120.0.6099.109'],
             printQRInTerminal: false,
             connectTimeoutMs: 60000,
-            defaultQueryTimeoutMs: 30000,
-            keepAliveIntervalMs: 15000,
+            defaultQueryTimeoutMs: 60000,
+            keepAliveIntervalMs: 10000,
             retryRequestDelayMs: 2000,
-            markOnlineOnConnect: false,
+            markOnlineOnConnect: true,
             syncFullHistory: false,
+            generateHighQualityLinkPreview: false,
+            getMessage: async () => ({ conversation: '' }),
         });
 
         sessions[mid].sock = sock;
